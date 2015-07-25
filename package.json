@@ -1,0 +1,33 @@
+{
+  "name": "chr2relax",
+  "version": "1.0.0",
+  "description": "CHRv2 to couchdb",
+  "main": "chr2.coffee",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/awto/chr2relax.git"
+  },
+  "keywords": [
+    "couchdb",
+    "chr",
+    "rules",
+    "solver"
+  ],
+  "author": "Vitaliy Akimov <vitaliy.akimov@gmail.com>",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/awto/chr2relax/issues"
+  },
+  "homepage": "https://github.com/awto/chr2relax",
+  "dependencies": {
+    "chalk": "^1.1.0",
+    "cot": "0.0.6",
+    "prettyjson": "^1.1.2",
+    "q": "^1.4.1",
+    "underscore": "^1.8.3",
+    "yield-on-promise": "0.0.1"
+  }
+}

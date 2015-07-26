@@ -12,7 +12,10 @@ bank = {
   constraints: [
     {name: "client", fields: {id:"int"}}
     {name: "account", fields: {client:"int", id: "int", balance: "float"}}
-    {name: "platinum", fields: {client:"int"}}
+    {
+      name: "platinum"
+      fields: {client:"int"}
+      keys: "all"}
     {name: "deposit", fields: {account:"int",amount:"float"}}
     {name: "withdraw", fields: {account:"int",amount:"float"}}
     ]
@@ -37,19 +40,7 @@ bank = {
           type: "platinum"
         fields:
           client: "C"
-    }]}
-  {
-    name: "platinum_set"
-    shared: ["C"]
-    head1:
-      guard: ["type === 'platinum'"]
-      shared: {C: "client"}
-    head2:
-      guard: ["type === 'platinum'"]
-      shared: {C: "client"}
-    body: [remove:"c$2"]}
-  ]}
-
+    }]}]}
 
 db = null
 store = null
@@ -70,6 +61,10 @@ initial = [
   {type:"account",id:2,client:1,balance:700}
   {type:"client",id:2}
   {type:"account",id:3,client:2,balance:1000}
+  {type:"account",id:4,client:2,balance:100}
+  {type:"client",id:3}
+  {type:"account",id:5,client:3,balance:1000}
+  {type:"account",id:6,client:3,balance:2000}
   ]
 
 reset = ->
@@ -90,14 +85,11 @@ gc = -> getStore().gc()
 
 calc_platinum = ->
   getStore().commit("calc_platinum")
-platinum_set = ->
-  getStore().commit("platinum_set")
 
 commands = {
   migrate
   reset
   calc_platinum
-  platinum_set
   gc }
 
 do ->

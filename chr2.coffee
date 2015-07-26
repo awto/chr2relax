@@ -253,12 +253,23 @@ compileViews = (solver) ->
     filters[nm] = r.genFilter()
   solver
 
+compileConstraints = (solver) ->
+  res = solver.keys = {}
+  flds = solver.fields = {}
+  for {name,keys,fields} in solver.constraints
+    if keys?
+      keys = (i for i of fields) if keys is "all"
+      res[name] = keys
+    flds[name] = fields
+  return
+
 compile = (solver) ->
   if solver._compiled
     return
   solver._compiled = true
   solver.prefix ?= "chr$ph$#{solver.name}"
   solver.needsCleanup = []
+  compileConstraints solver
   compileRules solver
   compileLists solver
   compileViews solver
@@ -311,8 +322,29 @@ class Store
   commit: (id) ->
     @getRule(id).commit(@)
   post: (obj) ->
+    unless obj._id
+      keys = @solver.keys[obj.type]
+      if keys?
+        id = mkHash(JSON.stringify(obj[i] for i in keys))
+        try
+          nobj = yop @db.get id
+          neq = false
+          for i of @solver.fields[obj.type] when not keys[i]?
+            unless obj[i] is nobj[i]
+              neq = true
+              break
+          unless neq
+            obj._rev = nobj._rev
+            return false
+          nobj[i] = v for i, v of obj
+          res = yop @db.post nobj
+          obj._rev = res.rev
+          return true
+        catch
+          obj._id = id
     res = yop @db.post obj
     obj._rev = res.rev
+    return true
   remove: (doc) ->
     delete doc.chr$lock
     yop @db.delete doc._id, doc._rev
@@ -467,15 +499,14 @@ SingleHead::commit = (store) ->
         doc.chr$lock = tid
         if prpgkey?
           doc[prpgkey] = true
-        store.post doc
+        yop db.post doc
       catch e
         console.error chalk.red("commit #{@name}"), e
         store.unlock doc
         continue
       args = [doc].concat(key)
       for i in @actions
-        ++effect
-        i.apply(store,args)
+        ++effect if i.apply(store,args)
       store.unlock doc    
     console.log "commit #{@name}", chalk.green("DONE!"), effect
     return effect is 0
@@ -541,8 +572,7 @@ DoubleHead::commit = (store) ->
             catch
               continue
           for i in actions
-            ++effect
-            i.apply(store,args)
+            ++effect if i.apply(store,args)
           store.unlock(doc2)
   store.unlock(doc) for doc in locked
   console.log "commit #{@name}:", chalk.green("DONE!"), effect 
@@ -574,8 +604,7 @@ Aggregate::commit = (store) ->
           if _guard? and not _guard.apply(store,args)
             continue
           for i in actions
-            ++effect
-            i.apply(store,args)
+            ++effect if i.apply(store,args)
   console.log "commit #{@name}:", chalk.green("DONE!"), effect 
   return effect is 0
 
@@ -623,15 +652,15 @@ Rule::compileBody = ->
   @
 
 actions.remove = (rule, v) ->
-  args = rule.vars.concat ["this.remove(#{v});"]
+  args = rule.vars.concat ["this.remove(#{v}); return true;"]
   new Function(args...)
 
 actions.post = (rule, opts) ->
   body = ["var obj = #{JSON.stringify(opts.obj)};"]
   for n,v of opts.fields
     body.push "obj.#{n} = #{v};"
-  body.push "this.post(obj);"
-  args = rule.vars.concat [body.join("\n")]
+  body.push "return this.post(obj);"
+  args = rule.vars.concat [body.join "\n"]
   new Function(args...)
 
 Rule::commitQ = (n) -> yop.frun => @commit n

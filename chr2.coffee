@@ -80,11 +80,65 @@ doubleHeadFilterTemplate = _.template("""
     <% if (rule.useWith) { %>with (doc) { try { <% } %>
      <% for(i = 1; i<=2; i++) {
         head = rule["head"+i];
-        if (!head)
-          throw new Error("no head " + i + "defined");
         %>if (<%=head.guard.join(" && ")%>)
             return true;
     <% }  %>
+    <% if (rule.useWith) { %> } catch(e) { return false; }} <% } %>
+    return false;
+  }
+  """,{variable:"rule"})
+
+aggregateMapTemplate = _.template("""
+  <% var i, head = rule.head, shared = rule.shared,
+         aggregate = rule.aggregate, s;
+  %>function(doc) {
+    var $$ = $1 = doc, key = [];
+    <% if (rule.useWith) { %>with (doc) { <% } %>
+    if (<%=head.guard.join(" && ")%>) {
+      <% for(i = 0; i < shared.length; ++i) { %>
+        key.push(<%=head.shared[shared[i]]%>);
+      <% } %>
+      key.push(1);
+      key.push($$._id);
+      <% for(i = 0; i < head.vars.length; ++i) { %>
+        key.push(head.vars[i][1]);
+      <% } %>
+      emit(key,<%=head.init%>);
+    } else if (<%=aggregate.guard.join(" && ")%>) {
+      <% for(i = 0; i < shared.length; ++i) { %>
+        <% s = shared[i]; %>
+        var <%=s%> = <%= aggregate.shared[s] %>;
+        key.push(<%=s%>);
+      <% } %>
+      key.push(2);
+      <% for(i = 0; i < aggregate.vars.length; ++i) { %>
+        var <%=aggregate.vars[i][0]%> = <%= aggregate.vars[i][1] %>;
+      <% } %>
+      emit(key,<%=aggregate.init%>);
+    }
+    <% if (rule.useWith) { %> } <% } %>
+  }
+  """, {variable:"rule"})
+
+aggregateReduceTemplate = _.template("""
+  <% var i, head = rule.head, shared = rule.shared,
+         aggregate = rule.aggregate;
+  %>function(key,<%= rule.result %>) {
+    var i;
+    <% for(i = 0; i < shared.length; ++i) { %>
+      var <%= shared[i] %> = key[<%=i%>];
+      return <%= rule.reduce %>;
+    <% } %>
+  }
+  """, {variable:"rule"})
+
+aggregateFilterTemplate = _.template("""
+  <% var i, j;
+  %>function(doc) {
+    var $$ = $1 = doc;
+    <% if (rule.useWith) { %> with (doc) { try { <% } %>
+    if (<%=rule.head.guard.join(" && ")%>) return true;
+    if (<%=rule.aggregate.guard.join(" && ")%>) return true;
     <% if (rule.useWith) { %> } catch(e) { return false; }} <% } %>
     return false;
   }
@@ -97,6 +151,7 @@ class Rule
     for i, v of opts
       @[i] = v
     name = @name ?= "rule$#{++nameId}"
+    @useWith = not @variable
     @headName = "head_#{name}"
     @body ?= []
     @computePrpgRule()
@@ -110,11 +165,11 @@ class SingleHead extends Rule
   constructor: (@solver, opts) ->
     super(opts)
     throw new Error("no head defined in #{@name}") unless @head
-    @useWith = not @variable
   compile: ->
     super()
     g = @head.guard ?= []
-    g.push ["!$$.chr$lock"]
+    # g.push ["!$$.chr$lock"]
+    @head.vars ?= []
     @
   genFilter: ->
     singleHeadFilterTemplate @
@@ -124,29 +179,53 @@ class SingleHead extends Rule
 
 class DoubleHead extends Rule
   constructor: (@solver, opts) ->
-    @useWith = not @variable
     super(opts)
+    throw new Error("no head 1 defined in #{@name}") unless @head1
+    throw new Error("no head 2 defined in #{@name}") unless @head2
   compile: ->
     super()
     g = @head1.guard ?= []
-    g.push ["!$$.chr$lock"]
+    # g.push ["!$$.chr$lock"]
     g = @head2.guard ?= []
-    g.push ["!$$.chr$lock"]
+    # g.push ["!$$.chr$lock"]
+    @head1.vars ?= []
+    @head2.vars ?= []
     @
   genFilter: ->
     doubleHeadFilterTemplate @
   genMap: ->
     doubleHeadMapTemplate @
-   
+
+class Aggregate extends Rule
+  constructor: (@solver, opts) ->
+    super(opts)
+    throw new Error("no head defined in #{@name}") unless @head
+    throw new Error("no aggregate head defined in #{@name}") unless @aggregate
+  compile: ->
+    super()
+    g = @head.guard ?= []
+    # g.push ["!$$.chr$lock"]
+    @head.vars ?= []
+    @aggregate.vars ?= []
+  genMap: ->
+    aggregateMapTemplate @
+  genReduce: ->
+    aggregateReduceTemplate @
+  genFilter: ->
+    aggregateFilterTemplate @
+
 prepareRule = (solver,rule) ->
-  if rule.head1? then new DoubleHead(solver,rule)
-  else new SingleHead(solver,rule)
+  if rule.head1? then return new DoubleHead(solver,rule)
+  else if rule.aggregate? then return new Aggregate(solver,rule)
+  else return new SingleHead(solver,rule)
 
 compileRules = (solver) ->
   byName = solver.byName = {}
   {rules} = solver
   for i,x in rules
-   rules[x] = cur = prepareRule(solver,i).compile()
+   r = prepareRule(solver,i)
+   r.compile()
+   rules[x] = cur = r
    byName[cur.name] = cur
   solver
 
@@ -168,8 +247,9 @@ compileViews = (solver) ->
   filters = solver._filters = {}
   for r in solver.rules
     nm = "head_#{r.name}"
-    views[nm] =
+    v = views[nm] =
       map: r.genMap()
+    v.reduce = r.genReduce() if r.genReduce?      
     filters[nm] = r.genFilter()
   solver
 
@@ -188,9 +268,11 @@ class Store
   constructor: (@db, @solver) ->
     compile(solver)
     @seq = {}
-  view: (name) ->
-    res = yop @db.view @solver.name, name,
-        {include_docs: true, update_seq: true}
+  view: (name, opts) ->
+    p = {update_seq: true}
+    if opts?
+      p[i] = v for i, v of opts
+    res = yop @db.view @solver.name, name, p
     @seq[name] = res.update_seq
     #pretty res
     res
@@ -308,9 +390,6 @@ compileLists = (solver) ->
     cur = list[name] = (j for j of fields)
   return
 
-head = (solver, name) ->
-    yop db.view solver.name, name, include_docs: true
-
 curListTempl = _.template("""
 function(head, res) {
   var i, v, args, row, types = <%=JSON.stringify(solver._list)%>;
@@ -370,12 +449,14 @@ DoubleHead::setIsPrpgRule = ->
     g = @["head#{i}"].guard ?= []
   return
 
+Aggregate::computePrpgRule = ->
+  
 locked = (doc,tid) ->
   return false if doc.chr$lock is tid
   return false unless doc.chr$locl
 
 SingleHead::commit = (store) ->
-    t = store.view @headName
+    t = store.view @headName, {include_docs: true}
     tid = @getTid()
     {prpgkey} = @
     {db} = store
@@ -420,7 +501,7 @@ Rule::getTid = ->
   mkHash "#{process.pid}.#{@name}.#{++threadCnt}"
 
 DoubleHead::commit = (store) ->
-  t = store.view @headName
+  t = store.view @headName, {include_docs: true}
   tid = @getTid() 
   first = []
   {prpg,shared,actions,_guard} = @
@@ -467,19 +548,62 @@ DoubleHead::commit = (store) ->
   console.log "commit #{@name}:", chalk.green("DONE!"), effect 
   return effect is 0
 
+Aggregate::commit = (store) ->
+  t = store.view @headName, {group:true}
+  tid = @getTid() 
+  first = []
+  {shared,actions,_guard} = @
+  {db} = store
+  effect = 0
+  sharedLen = shared.length
+  for i in t.rows
+    vars = i.key
+    val = i.value
+    sharedVars = vars[...sharedLen]
+    pos = vars[sharedLen]
+    unless keyCompare(cur, sharedVars)
+      cur = sharedVars
+      first.length = 0
+    switch pos
+      when 1
+        others = vars[sharedLen+1..]
+        first.push [others]
+      when 2
+        for [args1] in first
+          args = [val].concat(sharedVars,args1)
+          if _guard? and not _guard.apply(store,args)
+            continue
+          for i in actions
+            ++effect
+            i.apply(store,args)
+  console.log "commit #{@name}:", chalk.green("DONE!"), effect 
+  return effect is 0
+
 SingleHead::compileVars = ->
-  vars = @vars = ["c$1"]
+  res = @vars = ["c$1"]
+  vars = @head.vars ?= []
   for [i] in @head.vars
-    vars.push i
+    res.push i
   @
 
 DoubleHead::compileVars = ->
-  vars = @vars = ["c$1","c$2"]
-  vars.push(@shared...)
-  for [i] in @head1.vars
-    vars.push i
-  for [i] in @head2.vars
-    vars.push i
+  res = @vars = ["c$1","c$2"]
+  res.push(@shared...)
+  vars1 = @head1.vars ?= []
+  vars2 = @head2.vars ?= []
+  for [i] in vars1
+    res.push i
+  for [i] in vars2
+    res.push i
+  @
+
+Aggregate::compileVars = ->
+  res = @vars = [@result]
+  res.push(@shared...)
+  res.push "c$1"
+  vars = @head.vars ?= []
+  for [i] in vars
+    res.push i
   @
 
 Rule::compileGuard = ->
@@ -501,6 +625,7 @@ Rule::compileBody = ->
 actions.remove = (rule, v) ->
   args = rule.vars.concat ["this.remove(#{v});"]
   new Function(args...)
+
 actions.post = (rule, opts) ->
   body = ["var obj = #{JSON.stringify(opts.obj)};"]
   for n,v of opts.fields

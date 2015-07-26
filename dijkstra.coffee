@@ -5,7 +5,6 @@ prettyjson = require "prettyjson"
 yop = require "yield-on-promise"
 chalk = require "chalk"
 _ = require "underscore"
-crypto = require "crypto"
 Q = require "q"
 
 dijkstraCompiled = {
@@ -138,7 +137,7 @@ do ->
     for i in cmds
       cmd = commands[i]
       unless cmd?
-        console.error chalk.red("unknown command"), cmdName  
+        console.error chalk.red("unknown command"), cmd
       cmd()).done()
   return
 

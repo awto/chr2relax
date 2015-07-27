@@ -275,6 +275,42 @@ compile = (solver) ->
   compileViews solver
   return
 
+class Region
+  constructor: (@store,@key) ->
+    @locked = []
+  acquire: (id) ->
+    {db} = @store
+    try
+      doc = yop db.get id
+    catch e
+      return null
+    return null if doc.chr$lock? and doc.chr$lock isnt @key
+    doc.chr$lock = @key
+    try
+      res = yop db.post doc
+      doc._id = res.id
+      doc._rev = res.rev
+    catch e
+      return null
+    if doc.chr$ref
+      for i in doc.chr$ref
+        return null unless @acquire(i)
+    return doc
+  unlock: (d) ->
+    {db} = @store
+    return unless d.chr$lock
+    try
+      doc = yop db.get d._id
+      delete d.chr$lock
+      delete doc.chr$lock
+      yop db.post doc
+    catch e
+      console.log chalk.red("couldn't unlock"), doc, e
+  exit: ->
+    @unlock(i) for i in @locked
+    @locked.length = 0
+    return  
+
 class Store
   constructor: (@db, @solver) ->
     compile(solver)
@@ -287,6 +323,12 @@ class Store
     @seq[name] = res.update_seq
     #pretty res
     res
+  inRegion: (key, f) ->
+    reg = new Region(@,key)
+    try
+      return f(reg)
+    finally 
+      reg.exit()
   # waits for view from its last query
   waitView: (name) ->
     last = @seq[name]
@@ -296,7 +338,6 @@ class Store
         since:@seq[name]
         filter:"#{@solver.name}/#{name}"
         feed:"longpoll"})
-      #pretty r
       if r.results.length
         return
   migrate: -> migrate @db, @solver
@@ -349,40 +390,6 @@ class Store
     delete doc.chr$lock
     yop @db.delete doc._id, doc._rev
     @
-  lockObj: (id, key) ->
-    try
-      doc = yop @db.get id
-    catch e
-      return null
-    return null unless @lock doc, key
-    return doc
-  lock: (doc, key) ->
-    return true if doc.chr$lock is key
-    return false if doc.chr$lock?
-    doc.chr$lock = key
-    try
-      @post doc
-    catch e
-      console.log(chalk.red("couldn't lock"), doc, e)
-      delete doc.chr$lock
-      ndoc = yop @db.get doc.id
-      doc.chr$lock = ndoc.chr$lock
-      doc._rev = ndoc._rev
-      return doc.chr$lock is key
-      return false
-    return true
-  locked: (doc, key) ->
-    return false unless doc.chr$lock?
-    return false if doc.chr$lock is key
-    return true
-  unlock: (d) ->
-    return unless d.chr$lock
-    try
-      doc = yop @db.get d._id
-      delete doc.chr$lock
-      @post doc
-    catch e
-      console.log chalk.red("couldn't unlock"), doc, e
   gcIter: ->
     t = @view "gc"
     {db} = @
@@ -493,22 +500,21 @@ SingleHead::commit = (store) ->
     {prpgkey} = @
     {db} = store
     effect = 0
-    for {key,id,doc} in t.rows
-      continue if locked(doc,tid)
-      try
-        doc.chr$lock = tid
-        if prpgkey?
-          doc[prpgkey] = true
-        yop db.post doc
-      catch e
-        console.error chalk.red("commit #{@name}"), e
-        store.unlock doc
-        continue
-      args = [doc].concat(key)
-      for i in @actions
-        ++effect if i.apply(store,args)
-      store.unlock doc    
-    console.log "commit #{@name}", chalk.green("DONE!"), effect
+    store.inRegion tid, (reg) =>
+      for {key,id} in t.rows
+        doc = reg.acquire id
+        continue unless doc?
+        try
+          if prpgkey?
+            doc[prpgkey] = true
+            yop db.post doc
+        catch e
+          console.error chalk.red("commit #{@name}"), e
+          continue
+        args = [doc].concat(key)
+        for i in @actions
+          ++effect if i.apply(store,args)
+      console.log "commit #{@name}", chalk.green("DONE!"), effect
     return effect is 0
 
 keyCompare = (k1, k2) ->
@@ -539,43 +545,39 @@ DoubleHead::commit = (store) ->
   {db} = store
   effect = 0
   sharedLen = shared.length
-  locked = []
-  for i in t.rows
-    vars = i.key
-    sharedVars = vars[...sharedLen]
-    pos = vars[sharedLen]
-    others = vars[sharedLen+1..]
-    unless keyCompare(cur, sharedVars)
-      cur = sharedVars
-      first.length = 0
-    switch pos
-      when 1 then first.push [i.id,others]
-      when 2
-        id2 = i.id
-        for [id1,args1] in first
-          continue if id1 is id2
-          doc1 = store.lockObj(id1)
-          continue unless doc1?
-          locked.push doc1
-          doc2 = store.lockObj(id2)
-          continue unless doc2?
-          locked.push doc2
-          args = [doc1,doc2].concat(sharedVars,args1,others)
-          if _guard? and not _guard.apply(store,args)
-            continue
-          if prpg
-            try
-              yop db.post {
-                type:"chr$ph"
-                _id: getHistId(doc1, doc2)
-                chr$ref: [id1, id2]}
-            catch
+  store.inRegion tid, (reg) =>
+    for i in t.rows
+      vars = i.key
+      sharedVars = vars[...sharedLen]
+      pos = vars[sharedLen]
+      others = vars[sharedLen+1..]
+      unless keyCompare(cur, sharedVars)
+        cur = sharedVars
+        first.length = 0
+      switch pos
+        when 1 then first.push [i.id,others]
+        when 2
+          id2 = i.id
+          for [id1,args1] in first
+            continue if id1 is id2
+            doc1 = reg.acquire(id1)
+            continue unless doc1?
+            doc2 = reg.acquire(id2)
+            continue unless doc2?
+            args = [doc1,doc2].concat(sharedVars,args1,others)
+            if _guard? and not _guard.apply(store,args)
               continue
-          for i in actions
-            ++effect if i.apply(store,args)
-          store.unlock(doc2)
-  store.unlock(doc) for doc in locked
-  console.log "commit #{@name}:", chalk.green("DONE!"), effect 
+            if prpg
+              try
+                yop db.post {
+                  type:"chr$ph"
+                  _id: getHistId(doc1, doc2)
+                  chr$ref: [id1, id2]}
+              catch
+                continue
+            for i in actions
+              ++effect if i.apply(store,args)
+    console.log "commit #{@name}:", chalk.green("DONE!"), effect 
   return effect is 0
 
 Aggregate::commit = (store) ->

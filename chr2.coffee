@@ -52,22 +52,23 @@ singleHeadFilterTemplate = _.template("""
 doubleHeadMapTemplate = _.template("""
   <% var i, j, head, shared = rule.shared;
   %>function(doc) {
-    var $$ = $1 = doc;
+    var $$ = $1 = doc, $key;
     <% if (rule.useWith) { %>with (doc) <% } %> {
      <% for(i = 1; i<=2; i++) {
         head = rule["head"+i];
         if (!head)
           throw new Error("no head " + i + "defined");
-        %>if (<%=head.guard.join(" && ")%>)
-             emit([<%
-        for(j = 0; j < shared.length; ++j) {
-          %><%=head.shared[shared[j]]%>,<%
+        %>if (<%=head.guard.join(" && ")%>) {
+             $key = [];
+             <% for(j = 0; j < shared.length; ++j) { %>
+                $key.push(<%=head.shared[shared[j]]%>);
+             <% } %>
+             $key.push(<%=head.order%>, <%=i%>);
+             <% for(j = 0; j < head.vars.length; ++j) { %>
+                $key.push(<%=head.vars[j][1]%>);
+             <% } %>
+             emit($key,null);
         }
-        %><%=i%>,<%
-        for(j = 0; j < head.vars.length; ++j) {
-          %><%=head.vars[j][1]%>,<%
-        }
-        %>],doc._id);
     <% } %>
     }
   }
@@ -92,29 +93,31 @@ aggregateMapTemplate = _.template("""
   <% var i, head = rule.head, shared = rule.shared,
          aggregate = rule.aggregate, s;
   %>function(doc) {
-    var $$ = $1 = doc, key = [];
+    var $$ = $1 = doc, $key;
     <% if (rule.useWith) { %>with (doc) { <% } %>
     if (<%=head.guard.join(" && ")%>) {
+      $key = [];
       <% for(i = 0; i < shared.length; ++i) { %>
-        key.push(<%=head.shared[shared[i]]%>);
+        $key.push(<%=head.shared[shared[i]]%>);
       <% } %>
-      key.push(1);
-      key.push($$._id);
+      $key.push(1);
+      $key.push($$._id);
       <% for(i = 0; i < head.vars.length; ++i) { %>
-        key.push(head.vars[i][1]);
+        $key.push(head.vars[i][1]);
       <% } %>
-      emit(key,<%=head.init%>);
+      emit($key,<%=head.init%>);
     } else if (<%=aggregate.guard.join(" && ")%>) {
+      $key = []
       <% for(i = 0; i < shared.length; ++i) { %>
         <% s = shared[i]; %>
         var <%=s%> = <%= aggregate.shared[s] %>;
-        key.push(<%=s%>);
+        $key.push(<%=s%>);
       <% } %>
-      key.push(2);
+      $key.push(2);
       <% for(i = 0; i < aggregate.vars.length; ++i) { %>
         var <%=aggregate.vars[i][0]%> = <%= aggregate.vars[i][1] %>;
       <% } %>
-      emit(key,<%=aggregate.init%>);
+      emit($key,<%=aggregate.init%>);
     }
     <% if (rule.useWith) { %> } <% } %>
   }
@@ -184,12 +187,15 @@ class DoubleHead extends Rule
     throw new Error("no head 2 defined in #{@name}") unless @head2
   compile: ->
     super()
-    g = @head1.guard ?= []
+    {head1, head2} = @
+    g = head1.guard ?= []
     # g.push ["!$$.chr$lock"]
-    g = @head2.guard ?= []
+    g = head2.guard ?= []
     # g.push ["!$$.chr$lock"]
-    @head1.vars ?= []
-    @head2.vars ?= []
+    head1.vars ?= []
+    head2.vars ?= []
+    head1.order ?= "0"
+    head2.order ?= "0"
     @
   genFilter: ->
     doubleHeadFilterTemplate @
@@ -292,6 +298,7 @@ class Region
       doc._rev = res.rev
     catch e
       return null
+    @locked.push doc
     if doc.chr$ref
       for i in doc.chr$ref
         return null unless @acquire(i)
@@ -517,12 +524,16 @@ SingleHead::commit = (store) ->
       console.log "commit #{@name}", chalk.green("DONE!"), effect
     return effect is 0
 
-keyCompare = (k1, k2) ->
+keyEq = (k1, k2) ->
+  return not (k1 < k2 or k1 > k2)
+
+###
   return false unless k1?
   return false if k1.length isnt k2.length
   for i,x in k1
     return false if i isnt k2[x]
   return true
+###
 
 mkHash = (val) ->
   crypto.createHash("sha1").update(JSON.stringify(val)).digest("hex")
@@ -532,7 +543,6 @@ getHistId = (args...) ->
     mkHash(res.join '-')
 
 threadCnt = 0
-
 
 Rule::getTid = ->
   mkHash "#{process.pid}.#{@name}.#{++threadCnt}"
@@ -549,9 +559,9 @@ DoubleHead::commit = (store) ->
     for i in t.rows
       vars = i.key
       sharedVars = vars[...sharedLen]
-      pos = vars[sharedLen]
-      others = vars[sharedLen+1..]
-      unless keyCompare(cur, sharedVars)
+      pos = vars[sharedLen+1]
+      others = vars[sharedLen+2..]
+      if sharedVars > cur
         cur = sharedVars
         first.length = 0
       switch pos
@@ -567,6 +577,8 @@ DoubleHead::commit = (store) ->
             args = [doc1,doc2].concat(sharedVars,args1,others)
             if _guard? and not _guard.apply(store,args)
               continue
+            #TODO: lock actions!
+            # for posting constraints with keys
             if prpg
               try
                 yop db.post {
@@ -593,7 +605,7 @@ Aggregate::commit = (store) ->
     val = i.value
     sharedVars = vars[...sharedLen]
     pos = vars[sharedLen]
-    unless keyCompare(cur, sharedVars)
+    if sharedVars > cur
       cur = sharedVars
       first.length = 0
     switch pos
@@ -666,7 +678,6 @@ actions.post = (rule, opts) ->
   new Function(args...)
 
 Rule::commitQ = (n) -> yop.frun => @commit n
-
 
 module.exports = (db, solver) ->
   new Store(db, solver)

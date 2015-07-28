@@ -36,10 +36,12 @@ dijkstraCompiled = {
         guard: ["type==='dist'"]
         shared: {V: "to"}
         vars: [["D1","weight"]]
+        order: "weight"
       head2:
         guard: ["type==='dist'"]
         shared: {V: "to"}
         vars: [["D2","weight"]]
+        order: "weight"
       guard: ["D1 < D2"]
       body: [remove:"c$2"]
       },

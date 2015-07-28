@@ -284,7 +284,12 @@ compile = (solver) ->
 class Region
   constructor: (@store,@key) ->
     @locked = []
+    @objects = {}
   acquire: (id) ->
+    doc = @objects[id]
+    if doc?
+      return null if doc.chr$removed
+      return doc
     {db} = @store
     try
       doc = yop db.get id
@@ -299,11 +304,13 @@ class Region
     catch e
       return null
     @locked.push doc
+    @objects[id] = doc
     if doc.chr$ref
       for i in doc.chr$ref
         return null unless @acquire(i)
     return doc
   unlock: (d) ->
+    return if d.chr$removed
     {db} = @store
     return unless d.chr$lock
     try
@@ -314,7 +321,7 @@ class Region
     catch e
       console.log chalk.red("couldn't unlock"), doc, e
   exit: ->
-    @unlock(i) for i in @locked
+    @unlock(i) for i in @locked when not i.chr$removed
     @locked.length = 0
     return  
 
@@ -328,7 +335,6 @@ class Store
       p[i] = v for i, v of opts
     res = yop @db.view @solver.name, name, p
     @seq[name] = res.update_seq
-    #pretty res
     res
   inRegion: (key, f) ->
     reg = new Region(@,key)
@@ -395,6 +401,7 @@ class Store
     return true
   remove: (doc) ->
     delete doc.chr$lock
+    doc.chr$removed = true
     yop @db.delete doc._id, doc._rev
     @
   gcIter: ->

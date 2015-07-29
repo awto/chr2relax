@@ -292,6 +292,7 @@ class Region
   constructor: (@store,@key) ->
     @locked = []
     @objects = {}
+    @bulk = []
   acquire: (id) ->
     doc = @objects[id]
     if doc?
@@ -328,13 +329,20 @@ class Region
     catch e
       console.log chalk.red("couldn't unlock"), doc, e
   exit: ->
-    bulk = []
+    {bulk} = @
     for i in @locked when not i._deleted
       delete i.chr$lock
       bulk.push i
     res = yop @store.db.bulk bulk
     @locked.length = 0
+    bulk.length = true
     return  
+  post: (doc) ->
+    @bulk.push doc
+  remove: (doc) ->
+    doc._deleted = true
+    @bulk.push doc
+
 
 class Store
   constructor: (@db, @solver) ->
@@ -422,15 +430,17 @@ class Store
   gcIter: ->
     t = @view "gc", {include_docs:true}
     {db} = @
-    effect = 0
-    for {key:[ref,code],id,doc:{_rev}} in t.rows
+    bulk = []
+    for {key:[ref,code],id,doc} in t.rows
       switch code
         when 0 then skip = ref
         when 1
           try
             unless ref is skip
-              yop db.delete(id,_rev)
-              ++effect
+              doc._deleted = true
+              bulk.push doc
+    r = yop db.bulk bulk
+    effect = bulk.length
     console.log "gc", chalk.green("DONE!"), effect
     return
   gcLoop: ->
@@ -544,7 +554,7 @@ SingleHead::commit = (store) ->
           continue
         args = [doc].concat(key)
         for i in @actions
-          ++effect if i.apply(store,args)
+          ++effect if i.apply(reg,args)
       console.log "commit #{@name}", chalk.green("DONE!"), effect
     return effect is 0
 
@@ -656,7 +666,7 @@ DoubleHead::commit = (store) ->
               catch
                 continue
             for i in actions
-              ++effect if i.apply(store,args)
+              ++effect if i.apply(reg,args)
   console.log "commit #{@name}:", chalk.green("DONE!"), effect 
   return effect is 0
 

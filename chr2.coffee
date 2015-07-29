@@ -295,7 +295,7 @@ class Region
   acquire: (id) ->
     doc = @objects[id]
     if doc?
-      return null if doc.chr$removed
+      return null if doc._deleted
       return doc
     {db} = @store
     try
@@ -317,7 +317,7 @@ class Region
         return null unless @acquire(i)
     return doc
   unlock: (d) ->
-    return if d.chr$removed
+    return if d._deleted
     {db} = @store
     return unless d.chr$lock
     try
@@ -328,7 +328,11 @@ class Region
     catch e
       console.log chalk.red("couldn't unlock"), doc, e
   exit: ->
-    @unlock(i) for i in @locked when not i.chr$removed
+    bulk = []
+    for i in @locked when not i._deleted
+      delete i.chr$lock
+      bulk.push i
+    res = yop @store.db.bulk bulk
     @locked.length = 0
     return  
 
@@ -408,8 +412,12 @@ class Store
     return true
   remove: (doc) ->
     delete doc.chr$lock
-    doc.chr$removed = true
-    yop @db.delete doc._id, doc._rev
+    return if doc._deleted
+    doc._deleted = true
+    try
+      yop @db.delete doc._id, doc._rev
+    catch e
+      console.log chalk.red("couldn't delete"), doc, e
     @
   gcIter: ->
     t = @view "gc", {include_docs:true}
@@ -522,13 +530,15 @@ SingleHead::commit = (store) ->
     {db} = store
     effect = 0
     store.inRegion tid, (reg) =>
-      for {key,id} in t.rows
+      rows = reg.lockAll t.rows
+      for {key,id} in rows
         doc = reg.acquire id
         continue unless doc?
         try
           if prpgkey?
             doc[prpgkey] = true
-            yop db.post doc
+            r = yop db.post doc
+            doc._rev = r.rev
         catch e
           console.error chalk.red("commit #{@name}"), e
           continue
@@ -561,6 +571,39 @@ threadCnt = 0
 Rule::getTid = ->
   mkHash "#{process.pid}.#{@name}.#{++threadCnt}"
 
+Region::lockAll = (rows) ->
+  locked = {}
+  res = []
+  bulk = []
+  {key,locked} = @
+  for i in rows
+    {id} = i
+    doc = locked[id]
+    if doc?
+      i.doc = doc
+      res.push i
+      continue
+    doc = i.doc
+    if doc.chr$lock?
+      if doc.chr$lock is key
+        res.push i
+      else
+        doc.chr$skip = true
+      continue
+    locked[id] = doc
+    doc.chr$lock = key
+    res.push i
+    bulk.push doc
+  r = yop @store.db.bulk bulk
+  for i, x in r
+    doc = bulk[x]
+    if i.rev?
+      doc._rev = i.rev
+      locked.push doc
+    else
+      doc.chr$skip = true
+  return res
+
 DoubleHead::commit = (store) ->
   t = store.view @headName, {include_docs: true}
   tid = @getTid() 
@@ -571,7 +614,10 @@ DoubleHead::commit = (store) ->
   sharedLen = shared.length
   ph = {}
   store.inRegion tid, (reg) =>
-    for i in t.rows
+    rows = reg.lockAll(t.rows)
+    for i in rows
+      doc = i.doc
+      continue if doc.chr$skip
       vars = i.key
       sharedVars = vars[...sharedLen]
       pos = vars[sharedLen+1]
@@ -584,15 +630,12 @@ DoubleHead::commit = (store) ->
       switch pos
         when 0
           ph[i.id] = true
-        when 1 then first.push [i.id,others]
+        when 1 then first.push [i.id,others,doc]
         when 2
           id2 = i.id
-          for [id1,args1] in first
+          for [id1,args1,doc1] in first
             continue if id1 is id2
-            doc1 = reg.acquire(id1)
-            continue unless doc1?
-            doc2 = reg.acquire(id2)
-            continue unless doc2?
+            doc2 = doc
             args = [doc1,doc2].concat(sharedVars,args1,others)
             if _guard? and not _guard.apply(store,args)
               continue

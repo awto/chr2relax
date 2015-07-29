@@ -121,7 +121,7 @@ reset = ->
   console.log "reset", chalk.green("DONE!")
 
 gc = ->
-  getStore().gc()
+  getStore().gcIter()
 
 commands = {
   migrate: migrateCmd
@@ -139,7 +139,7 @@ do ->
     for i in cmds
       cmd = commands[i]
       unless cmd?
-        console.error chalk.red("unknown command"), cmd
+        console.error chalk.red("unknown command"), i
       cmd()).done()
   return
 

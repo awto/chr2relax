@@ -53,6 +53,12 @@ doubleHeadMapTemplate = _.template("""
   <% var i, j, head, shared = rule.shared;
   %>function(doc) {
     var $$ = $1 = doc, $key;
+    <% if (rule.PH_IN_VIEW && rule.prpg) { %>
+      if (doc.type === "chr$ph" && doc.rule === "<%=rule.name%>") {
+        emit(doc.key, null);
+        return;
+      }
+    <% } %>
     <% if (rule.useWith) { %>with (doc) <% } %> {
      <% for(i = 1; i<=2; i++) {
         head = rule["head"+i];
@@ -181,6 +187,7 @@ class SingleHead extends Rule
     
 
 class DoubleHead extends Rule
+  PH_IN_VIEW: true
   constructor: (@solver, opts) ->
     super(opts)
     throw new Error("no head 1 defined in #{@name}") unless @head1
@@ -405,7 +412,7 @@ class Store
     yop @db.delete doc._id, doc._rev
     @
   gcIter: ->
-    t = @view "gc"
+    t = @view "gc", {include_docs:true}
     {db} = @
     effect = 0
     for {key:[ref,code],id,doc:{_rev}} in t.rows
@@ -562,6 +569,7 @@ DoubleHead::commit = (store) ->
   {db} = store
   effect = 0
   sharedLen = shared.length
+  ph = {}
   store.inRegion tid, (reg) =>
     for i in t.rows
       vars = i.key
@@ -571,7 +579,11 @@ DoubleHead::commit = (store) ->
       if sharedVars > cur
         cur = sharedVars
         first.length = 0
+        ph = {}
+      cur = sharedVars
       switch pos
+        when 0
+          ph[i.id] = true
         when 1 then first.push [i.id,others]
         when 2
           id2 = i.id
@@ -586,17 +598,23 @@ DoubleHead::commit = (store) ->
               continue
             #TODO: lock actions!
             # for posting constraints with keys
+            # add chr$ph into view!!! 
             if prpg
               try
+                histKey = getHistId doc1, doc2
+                continue if ph[histKey]
+                key = sharedVars.concat([0])
                 yop db.post {
                   type:"chr$ph"
-                  _id: getHistId(doc1, doc2)
+                  _id: histKey
+                  rule: @name
+                  key
                   chr$ref: [id1, id2]}
               catch
                 continue
             for i in actions
               ++effect if i.apply(store,args)
-    console.log "commit #{@name}:", chalk.green("DONE!"), effect 
+  console.log "commit #{@name}:", chalk.green("DONE!"), effect 
   return effect is 0
 
 Aggregate::commit = (store) ->

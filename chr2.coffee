@@ -228,7 +228,10 @@ class Aggregate extends Rule
     aggregateFilterTemplate @
 
 prepareRule = (solver,rule) ->
-  if rule.head1? then return new DoubleHead(solver,rule)
+  if rule.head1?
+    if checkPrpgRule rule
+      return new DoubleHeadPrpg(solver,rule)
+    return new DoubleHead(solver,rule)
   else if rule.aggregate? then return new Aggregate(solver,rule)
   else return new SingleHead(solver,rule)
 
@@ -505,7 +508,18 @@ migrate = (db, solver) ->
   yop db.post(design)
   console.log "migration", chalk.green("DONE!"), "at", design._rev
 
+checkPrpgRule = (rule) ->
+  val = rule.prpg
+  unless val?
+    val = true
+    for i in rule.body when i.remove?
+      val = false
+      break
+  return rule.prpg = val
+
 Rule::computePrpgRule = ->
+
+SingleHead::computePrpgRule = ->
     val = @prpg
     unless val?
       val = true
@@ -618,13 +632,57 @@ DoubleHead::commit = (store) ->
   t = store.view @headName, {include_docs: true}
   tid = @getTid() 
   first = []
-  {prpg,shared,actions,_guard} = @
+  {shared,actions,_guard} = @
   {db} = store
   effect = 0
   sharedLen = shared.length
   ph = {}
   store.inRegion tid, (reg) =>
     rows = reg.lockAll(t.rows)
+    prods = []
+    for i in rows
+      doc = i.doc
+      continue if doc.chr$skip
+      vars = i.key
+      sharedVars = vars[...sharedLen]
+      pos = vars[sharedLen+1]
+      others = vars[sharedLen+2..]
+      if sharedVars > cur
+        cur = sharedVars
+        first.length = 0
+        ph = {}
+      cur = sharedVars
+      switch pos
+        when 1 then first.push [i.id,others,doc]
+        when 2
+          id2 = i.id
+          for [id1,args1,doc1] in first
+            continue if id1 is id2
+            doc2 = doc
+            args = [doc1,doc2].concat(sharedVars,args1,others)
+            if _guard? and not _guard.apply(store,args)
+              continue
+            for j in actions
+              ++effect if j.apply(reg,args)
+  console.log "commit #{@name}:", chalk.green("DONE!"), effect 
+  return effect is 0
+
+class DoubleHeadPrpg extends DoubleHead
+  constructor: (store, rule) -> super(store, rule)
+  prpg: true
+
+DoubleHeadPrpg::commit = (store) ->
+  t = store.view @headName, {include_docs: true}
+  tid = @getTid() 
+  first = []
+  {shared,actions,_guard} = @
+  {db} = store
+  effect = 0
+  sharedLen = shared.length
+  ph = {}
+  store.inRegion tid, (reg) =>
+    rows = reg.lockAll(t.rows)
+    prods = []
     for i in rows
       doc = i.doc
       continue if doc.chr$skip
@@ -649,27 +707,30 @@ DoubleHead::commit = (store) ->
             args = [doc1,doc2].concat(sharedVars,args1,others)
             if _guard? and not _guard.apply(store,args)
               continue
-            #TODO: lock actions!
-            # for posting constraints with keys
-            # add chr$ph into view!!! 
-            if prpg
-              try
-                histKey = getHistId doc1, doc2
-                continue if ph[histKey]
-                key = sharedVars.concat([0])
-                yop db.post {
-                  type:"chr$ph"
-                  _id: histKey
-                  rule: @name
-                  key
-                  chr$ref: [id1, id2]}
-              catch
-                continue
-            for i in actions
-              ++effect if i.apply(reg,args)
+            prods.push args
+    phbulk = []
+    for i in prods
+      [doc1, doc2] = i
+      #console.log doc1, doc2
+      histKey = getHistId doc1, doc2
+      key = sharedVars.concat([0])
+      phbulk.push {
+        type:"chr$ph"
+        _id: histKey
+        rule: @name
+        key
+        chr$ref: [doc1._id, doc2._id2]}
+    #pretty phbulk
+    r = yop db.bulk phbulk
+    #pretty r
+    for i,x in r when i.rev?
+      args = prods[x]
+      for j in actions
+        ++effect if j.apply(reg,args)
   console.log "commit #{@name}:", chalk.green("DONE!"), effect 
   return effect is 0
 
+  
 Aggregate::commit = (store) ->
   t = store.view @headName, {group:true}
   tid = @getTid() 

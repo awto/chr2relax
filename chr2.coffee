@@ -506,7 +506,7 @@ migrate = (db, solver) ->
   design.lists =
     compact: curListTempl(solver)
   yop db.post(design)
-  console.log "migration", chalk.green("DONE!"), "at", design._rev
+  console.log "migration", chalk.green("DONE!"), "at", design._rev ? "initial"
 
 checkPrpgRule = (rule) ->
   val = rule.prpg
@@ -571,17 +571,6 @@ SingleHead::commit = (store) ->
           ++effect if i.apply(reg,args)
       console.log "commit #{@name}", chalk.green("DONE!"), effect
     return effect is 0
-
-keyEq = (k1, k2) ->
-  return not (k1 < k2 or k1 > k2)
-
-###
-  return false unless k1?
-  return false if k1.length isnt k2.length
-  for i,x in k1
-    return false if i isnt k2[x]
-  return true
-###
 
 mkHash = (val) ->
   crypto.createHash("sha1").update(JSON.stringify(val)).digest("hex")
@@ -711,7 +700,6 @@ DoubleHeadPrpg::commit = (store) ->
     phbulk = []
     for i in prods
       [doc1, doc2] = i
-      #console.log doc1, doc2
       histKey = getHistId doc1, doc2
       key = sharedVars.concat([0])
       phbulk.push {
@@ -719,10 +707,8 @@ DoubleHeadPrpg::commit = (store) ->
         _id: histKey
         rule: @name
         key
-        chr$ref: [doc1._id, doc2._id2]}
-    #pretty phbulk
+        chr$ref: [doc1._id, doc2._id]}
     r = yop db.bulk phbulk
-    #pretty r
     for i,x in r when i.rev?
       args = prods[x]
       for j in actions

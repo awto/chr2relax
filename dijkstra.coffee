@@ -93,32 +93,15 @@ commit_label = ->
 
 resetHard = ->
   db = getDb()
-  d = yop db.allDocs({include_docs:true})
-  for {doc} in d.rows
-    if doc.type?
-      try
-        yop db.delete(doc._id,doc._rev)
+  yop db.cot.jsonRequest "DELETE", "/#{db.name}" 
+  yop db.cot.jsonRequest "PUT", "/#{db.name}"
+  migrateCmd()
   yop db.post {type:"edge",from:1,weight:1,to:2}
   yop db.post {type:"edge",from:1,weight:10,to:3}
   yop db.post {type:"edge",from:2,weight:1,to:4}
   yop db.post {type:"edge",from:3,weight:9,to:4}
   yop db.post {type:"edge",from:4,weight:2,to:1}
   yop db.post {type:"source",id:1}
-
-reset = ->
-  db = getDb()
-  d = yop db.allDocs({include_docs:true})
-  for {doc} in d.rows
-    if doc.type? and (doc.type is "dist" or doc.type.lastIndexOf("chr$") is 0) 
-      yop db.delete(doc._id,doc._rev)
-    else
-      any = false
-      for i of doc when i.lastIndexOf("chr$") is 0
-        delete doc[i]
-        any = true
-      if any
-        yop db.post(doc) 
-  console.log "reset", chalk.green("DONE!")
 
 gc = ->
   getStore().gcIter()

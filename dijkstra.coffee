@@ -17,10 +17,10 @@ dijkstraCompiled = {
   rules: [
     {
       name: "init"
-      # variable: "_"
+      variable: "_"
       head:
-        vars: [["C","id"]]
-        guard: ["type==='source'"]
+        vars: [["C","_.id"]]
+        guard: ["_.type==='source'"]
       body: [{post:
         obj:
           type:"dist"
@@ -31,31 +31,36 @@ dijkstraCompiled = {
       },
     {
       name: "keep_shortest"
+      variable: "_"
+      STAT: true
       shared: ["V"]
       head1:
-        guard: ["type==='dist'"]
-        shared: {V: "to"}
-        vars: [["D1","weight"]]
-        order: "weight"
+        guard: ["_.type==='dist'"]
+        shared: {V: "_.to"}
+        vars: [["D1","_.weight"]]
+        order: "_.weight"
       head2:
-        guard: ["type==='dist'"]
-        shared: {V: "to"}
-        vars: [["D2","weight"]]
-        order: "weight"
+        guard: ["_.type==='dist'"]
+        shared: {V: "_.to"}
+        vars: [["D2","_.weight"]]
+        order: "_.weight"
       guard: ["D1 < D2"]
       body: [remove:"c$2"]
       },
     {
       name: "label"
+      STAT: true
+      variable: "_"
+      #PH_IN_VIEW: true
       shared: ["V"]
       head1:
-        guard: ["type==='dist'"]
-        shared: {V:"to"}
-        vars: [["D","weight"]]
+        guard: ["_.type==='dist'"]
+        shared: {V:"_.to"}
+        vars: [["D","_.weight"]]
       head2:
-        guard: ["type==='edge'"]
-        shared: {V:"from"}
-        vars: [["U","to"],["C","weight"]]
+        guard: ["_.type==='edge'"]
+        shared: {V:"_.from"}
+        vars: [["U","_.to"],["C","_.weight"]]
       body: [{
         post:
           obj:

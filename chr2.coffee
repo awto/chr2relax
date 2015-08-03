@@ -7,6 +7,8 @@ crypto = require "crypto"
 querystring = require "querystring"
 Q = require "q"
 
+GLOBAL_STAT = false
+
 actions = []
 
 pretty = (d) ->
@@ -29,6 +31,9 @@ singleHeadMapTemplate = _.template("""
 <% var i, head = rule.head, vars = head.vars;
 %>function(doc) {
     var $$ = $1 = doc;
+    <% if (rule.variable) { %>
+      var <%=rule.variable%> = doc;
+    <% } %>
     <% if (rule.useWith) { %>with (doc) <% } %>{
       if (<%= head.guard.join(" && ") %>)
         emit([<% for(i = 0;i < vars.length;++i) {
@@ -41,6 +46,9 @@ singleHeadFilterTemplate = _.template("""
 <% var i, head = rule.head, vars = head.vars;
 %>function(doc) {
     var $$ = $1 = doc;
+    <% if (rule.variable) { %>
+      var <%=rule.variable%> = doc;
+    <% } %>
     <% if (rule.useWith) { %> with (doc) { try { <% } %>
       if (<%= head.guard.join(" && ") %>)
         return true;
@@ -53,9 +61,12 @@ doubleHeadMapTemplate = _.template("""
   <% var i, j, head, shared = rule.shared;
   %>function(doc) {
     var $$ = $1 = doc, $key;
+    <% if (rule.variable) { %>
+      var <%=rule.variable%> = doc;
+    <% } %>
     <% if (rule.PH_IN_VIEW && rule.prpg) { %>
       if (doc.type === "chr$ph" && doc.rule === "<%=rule.name%>") {
-        emit(doc.key, null);
+        emit(doc.key.concat([0]),null);
         return;
       }
     <% } %>
@@ -84,6 +95,9 @@ doubleHeadFilterTemplate = _.template("""
   <% var i, j, head, shared = rule.shared;
   %>function(doc) {
     var $$ = $1 = doc;
+    <% if (rule.variable) { %>
+      var <%=rule.variable%> = doc;
+    <% } %>
     <% if (rule.useWith) { %>with (doc) { try { <% } %>
      <% for(i = 1; i<=2; i++) {
         head = rule["head"+i];
@@ -100,6 +114,9 @@ aggregateMapTemplate = _.template("""
          aggregate = rule.aggregate, s;
   %>function(doc) {
     var $$ = $1 = doc, $key;
+    <% if (rule.variable) { %>
+      var <%=rule.variable%> = doc;
+    <% } %>
     <% if (rule.useWith) { %>with (doc) { <% } %>
     if (<%=head.guard.join(" && ")%>) {
       $key = [];
@@ -145,6 +162,9 @@ aggregateFilterTemplate = _.template("""
   <% var i, j;
   %>function(doc) {
     var $$ = $1 = doc;
+    <% if (rule.variable) { %>
+      var <%=rule.variable%> = doc;
+    <% } %>
     <% if (rule.useWith) { %> with (doc) { try { <% } %>
     if (<%=rule.head.guard.join(" && ")%>) return true;
     if (<%=rule.aggregate.guard.join(" && ")%>) return true;
@@ -187,7 +207,7 @@ class SingleHead extends Rule
     
 
 class DoubleHead extends Rule
-  PH_IN_VIEW: true
+  PH_IN_VIEW: false
   constructor: (@solver, opts) ->
     super(opts)
     throw new Error("no head 1 defined in #{@name}") unless @head1
@@ -332,13 +352,15 @@ class Region
     catch e
       console.log chalk.red("couldn't unlock"), doc, e
   exit: ->
-    {bulk} = @
+    {bulk,STAT} = @
+    console.time "#{STAT} exit" if STAT?
     for i in @locked when not i._deleted
       delete i.chr$lock
       bulk.push i
     res = yop @store.db.bulk bulk
     @locked.length = 0
     bulk.length = true
+    console.timeEnd "#{STAT} exit" if STAT?
     return  
   post: (doc) ->
     @bulk.push doc
@@ -460,7 +482,6 @@ class Store
           since:update_seq
           feed: "longpoll"
           doc_ids: JSON.stringify [id]})
-      pretty change
       update_seq = change.last_seq
       return for i in change.results when i.deleted
   runQ: -> yop.frun => @run()
@@ -588,10 +609,10 @@ Region::lockAll = (rows) ->
   locked = {}
   res = []
   bulk = []
-  {key,locked} = @
+  {key,locked,objects} = @
   for i in rows
     {id} = i
-    doc = locked[id]
+    doc = objects[id]
     if doc?
       i.doc = doc
       res.push i
@@ -599,14 +620,16 @@ Region::lockAll = (rows) ->
     doc = i.doc
     if doc.chr$lock?
       if doc.chr$lock is key
+        objects[id] = doc
         res.push i
       else
         doc.chr$skip = true
       continue
-    locked[id] = doc
+    objects[id] = doc
     doc.chr$lock = key
     res.push i
     bulk.push doc
+  console.log chalk.yellow("STAT:"), @STAT, "lock bulk", bulk.length if @STAT?
   r = yop @store.db.bulk bulk
   for i, x in r
     doc = bulk[x]
@@ -618,20 +641,31 @@ Region::lockAll = (rows) ->
   return res
 
 DoubleHead::commit = (store) ->
+  STAT = @STAT ? GLOBAL_STAT
+  {shared,actions,_guard,name} = @
+  if STAT
+    stat = (tag, val) =>
+      console.log chalk.yellow("STAT:"), "#{name}: #{tag}:", val   
+  console.time "#{name} request" if STAT
+  console.time "#{name}" if STAT
   t = store.view @headName, {include_docs: true}
+  console.timeEnd "#{name} request" if STAT
   tid = @getTid() 
   first = []
-  {shared,actions,_guard} = @
   {db} = store
   effect = 0
   sharedLen = shared.length
   ph = {}
   store.inRegion tid, (reg) =>
+    reg.STAT = name if STAT
+    console.time "#{name} lock"
     rows = reg.lockAll(t.rows)
-    prods = []
+    console.timeEnd "#{name} lock"
+    statNotMatched = 0
+    statMatched = 0
     for i in rows
       doc = i.doc
-      continue if doc.chr$skip
+      continue if doc.chr$skip or doc._deleted
       vars = i.key
       sharedVars = vars[...sharedLen]
       pos = vars[sharedLen+1]
@@ -646,14 +680,25 @@ DoubleHead::commit = (store) ->
         when 2
           id2 = i.id
           for [id1,args1,doc1] in first
-            continue if id1 is id2
+            continue if id1 is id2 or doc1._deleted
             doc2 = doc
             args = [doc1,doc2].concat(sharedVars,args1,others)
             if _guard? and not _guard.apply(store,args)
+              ++statNotMatched if STAT
               continue
+            ++statMatched if STAT
             for j in actions
               ++effect if j.apply(reg,args)
-  console.log "commit #{@name}:", chalk.green("DONE!"), effect 
+    if STAT
+      stat "loaded", t.rows.length
+      stat "locked rows", rows.length
+      stat "bulk", reg.bulk.length
+      stat "not matched", statNotMatched
+      stat "matched", statMatched
+      stat "locked objs", reg.locked.length
+      stat "effect", effect 
+  console.timeEnd "#{name}" if STAT
+  console.log "commit #{name}:", chalk.green("DONE!"), effect 
   return effect is 0
 
 class DoubleHeadPrpg extends DoubleHead
@@ -661,22 +706,37 @@ class DoubleHeadPrpg extends DoubleHead
   prpg: true
 
 DoubleHeadPrpg::commit = (store) ->
+  STAT = @STAT ? GLOBAL_STAT
+  {shared,actions,_guard,name} = @
+  if STAT
+    stat = (tag, val...) =>
+      console.log chalk.yellow("STAT:"), "#{name}: #{tag}:", val...   
+  console.time "#{name} request" if STAT
+  console.time "#{name}" if STAT
   t = store.view @headName, {include_docs: true}
+  console.timeEnd "#{name} request" if STAT
   tid = @getTid() 
   first = []
-  {shared,actions,_guard} = @
   {db} = store
   effect = 0
   sharedLen = shared.length
   ph = {}
   store.inRegion tid, (reg) =>
+    reg.STAT = name if STAT
+    console.time "#{name} lock" if STAT
     rows = reg.lockAll(t.rows)
+    console.timeEnd "#{name} lock" if STAT
     prods = []
+    statNotMatched = 0
+    statMatched = 0
+    statPhKeys = 0
+    statPhMatched = 0
     for i in rows
       doc = i.doc
-      continue if doc.chr$skip
+      continue if doc.chr$skip or doc._deleted
       vars = i.key
       sharedVars = vars[...sharedLen]
+      order = vars[sharedLen]
       pos = vars[sharedLen+1]
       others = vars[sharedLen+2..]
       if sharedVars > cur
@@ -686,36 +746,60 @@ DoubleHeadPrpg::commit = (store) ->
       cur = sharedVars
       switch pos
         when 0
+          ++statPhKeys if STAT
           ph[i.id] = true
-        when 1 then first.push [i.id,others,doc]
+        when 1 then first.push [i.id,others,doc,order]
         when 2
           id2 = i.id
-          for [id1,args1,doc1] in first
-            continue if id1 is id2
+          for [id1,args1,doc1,order] in first
+            continue if id1 is id2 or doc1._deleted
             doc2 = doc
+            histKey = getHistId doc1, doc2
+            if ph[histKey]
+              ++statPhMatched if STAT
+              continue
             args = [doc1,doc2].concat(sharedVars,args1,others)
             if _guard? and not _guard.apply(store,args)
+              ++statNotMatched
               continue
-            prods.push args
+            ++statMatched
+            prods.push [args, histKey, sharedVars.concat([order])]
     phbulk = []
-    for i in prods
+    console.time("#{name} ph") if STAT
+    for [i,histKey,key] in prods
       [doc1, doc2] = i
-      histKey = getHistId doc1, doc2
-      key = sharedVars.concat([0])
       phbulk.push {
         type:"chr$ph"
         _id: histKey
-        rule: @name
+        rule: name
         key
         chr$ref: [doc1._id, doc2._id]}
     r = yop db.bulk phbulk
+    console.timeEnd("#{name} ph") if STAT
+    console.time("#{name} body") if STAT
+    statPH = 0
     for i,x in r when i.rev?
-      args = prods[x]
+      ++statPH if STAT
+      [args] = prods[x]
       for j in actions
         ++effect if j.apply(reg,args)
-  console.log "commit #{@name}:", chalk.green("DONE!"), effect 
+    console.timeEnd("#{name} body") if STAT
+    if STAT
+      stat "loaded", t.rows.length
+      stat "locked rows", rows.length
+      stat "prods", prods.length
+      stat "bulk", reg.bulk.length
+      stat "not matched", statNotMatched
+      stat "matched", statMatched
+      stat "locked objs", reg.locked.length
+      stat "PH: matched:", statPhMatched
+      stat "PH: keys:", statPhKeys
+      stat "PH: tot:", r.length
+      stat "PH: ok:", statPH
+      stat "PH: conflict:", r.length - statPH
+      stat "effect", effect 
+  console.log "commit #{name}:", chalk.green("DONE!"), effect 
   return effect is 0
-
   
 Aggregate::commit = (store) ->
   t = store.view @headName, {group:true}

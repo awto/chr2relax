@@ -34,31 +34,30 @@ singleHeadMapTemplate = _.template("""
     <% if (rule.variable) { %>
       var <%=rule.variable%> = doc;
     <% } %>
-    <% if (rule.useWith) { %>with (doc) <% } %>{
-      if (<%= head.guard.join(" && ") %>)
-        emit([<% for(i = 0;i < vars.length;++i) {
-                 %><%=vars[i][1]%><% }%>],doc._id);
+    if (<%= head.guard.join(" && ") %>) {
+      <%= rule.mkWith(head) %>
+      emit([<% for(i = 0;i < vars.length;++i) {
+          %><%=vars[i][1]%><% }%>],doc._id);
     }
 }
 """, {variable:"rule"})
 
 singleHeadFilterTemplate = _.template("""
-<% var i, head = rule.head, vars = head.vars;
+<% var i, j, head = rule.head, vars = head.vars;
 %>function(doc) {
     var $$ = $1 = doc;
     <% if (rule.variable) { %>
       var <%=rule.variable%> = doc;
     <% } %>
-    <% if (rule.useWith) { %> with (doc) { try { <% } %>
-      if (<%= head.guard.join(" && ") %>)
-        return true;
-    <% if (rule.useWith) { %> } catch(e) { return false; }} <% } %>
+    if (<%= head.guard.join(" && ") %>) {
+      return true;
+    }
     return false;
 }
 """, {variable:"rule"})
 
 doubleHeadMapTemplate = _.template("""
-  <% var i, j, head, shared = rule.shared;
+  <% var i, j, k, head, shared = rule.shared;
   %>function(doc) {
     var $$ = $1 = doc, $key;
     <% if (rule.variable) { %>
@@ -70,12 +69,13 @@ doubleHeadMapTemplate = _.template("""
         return;
       }
     <% } %>
-    <% if (rule.useWith) { %>with (doc) <% } %> {
-     <% for(i = 1; i<=2; i++) {
+    <% for(i = 1; i<=2; i++) {
         head = rule["head"+i];
         if (!head)
           throw new Error("no head " + i + "defined");
-        %>if (<%=head.guard.join(" && ")%>) {
+        %>
+          if (<%=head.guard.join(" && ")%>) {
+            <%= rule.mkWith(head) %>
              $key = [];
              <% for(j = 0; j < shared.length; ++j) { %>
                 $key.push(<%=head.shared[shared[j]]%>);
@@ -87,7 +87,6 @@ doubleHeadMapTemplate = _.template("""
              emit($key,null);
         }
     <% } %>
-    }
   }
   """,{variable:"rule"})
 
@@ -98,13 +97,11 @@ doubleHeadFilterTemplate = _.template("""
     <% if (rule.variable) { %>
       var <%=rule.variable%> = doc;
     <% } %>
-    <% if (rule.useWith) { %>with (doc) { try { <% } %>
-     <% for(i = 1; i<=2; i++) {
-        head = rule["head"+i];
-        %>if (<%=head.guard.join(" && ")%>)
+    <% for(i = 1; i<=2; i++) { %>
+        <% head = rule["head"+i]; %>
+        if (<%=head.guard.join(" && ")%>)
             return true;
     <% }  %>
-    <% if (rule.useWith) { %> } catch(e) { return false; }} <% } %>
     return false;
   }
   """,{variable:"rule"})
@@ -117,8 +114,8 @@ aggregateMapTemplate = _.template("""
     <% if (rule.variable) { %>
       var <%=rule.variable%> = doc;
     <% } %>
-    <% if (rule.useWith) { %>with (doc) { <% } %>
     if (<%=head.guard.join(" && ")%>) {
+      <%= rule.mkWith(head) %>
       $key = [];
       <% for(i = 0; i < shared.length; ++i) { %>
         $key.push(<%=head.shared[shared[i]]%>);
@@ -131,6 +128,7 @@ aggregateMapTemplate = _.template("""
       emit($key,<%=head.init%>);
     } else if (<%=aggregate.guard.join(" && ")%>) {
       $key = []
+      <%= rule.mkWith(aggregate) %>
       <% for(i = 0; i < shared.length; ++i) { %>
         <% s = shared[i]; %>
         var <%=s%> = <%= aggregate.shared[s] %>;
@@ -142,7 +140,6 @@ aggregateMapTemplate = _.template("""
       <% } %>
       emit($key,<%=aggregate.init%>);
     }
-    <% if (rule.useWith) { %> } <% } %>
   }
   """, {variable:"rule"})
 
@@ -165,10 +162,8 @@ aggregateFilterTemplate = _.template("""
     <% if (rule.variable) { %>
       var <%=rule.variable%> = doc;
     <% } %>
-    <% if (rule.useWith) { %> with (doc) { try { <% } %>
     if (<%=rule.head.guard.join(" && ")%>) return true;
     if (<%=rule.aggregate.guard.join(" && ")%>) return true;
-    <% if (rule.useWith) { %> } catch(e) { return false; }} <% } %>
     return false;
   }
   """,{variable:"rule"})
@@ -180,8 +175,8 @@ class Rule
     for i, v of opts
       @[i] = v
     name = @name ?= "rule$#{++nameId}"
-    @useWith = not @variable
     @headName = "head_#{name}"
+    @useWith = not @variable?
     @body ?= []
     @computePrpgRule()
   compile: ->
@@ -190,15 +185,19 @@ class Rule
     @compileGuard()
     @
 
+Rule::mkWith = (head) ->
+  return "" unless @useWith and head.type?
+  flds = @solver.fields[head.type]
+  throw new Error("no such field #{name}") unless flds?
+  ("     var #{i} = $$.#{i};" for i of flds).join("\n")
+
 class SingleHead extends Rule
   constructor: (@solver, opts) ->
     super(opts)
     throw new Error("no head defined in #{@name}") unless @head
   compile: ->
     super()
-    g = @head.guard ?= []
-    # g.push ["!$$.chr$lock"]
-    @head.vars ?= []
+    compileHead @head
     @
   genFilter: ->
     singleHeadFilterTemplate @
@@ -215,19 +214,19 @@ class DoubleHead extends Rule
   compile: ->
     super()
     {head1, head2} = @
-    g = head1.guard ?= []
-    # g.push ["!$$.chr$lock"]
-    g = head2.guard ?= []
-    # g.push ["!$$.chr$lock"]
-    head1.vars ?= []
-    head2.vars ?= []
-    head1.order ?= "0"
-    head2.order ?= "0"
+    compileHead head1
+    compileHead head2
     @
   genFilter: ->
     doubleHeadFilterTemplate @
   genMap: ->
     doubleHeadMapTemplate @
+
+compileHead = (head) ->
+    g = head.guard ?= []
+    head.vars ?= []
+    head.order ?= "0"
+    g.push("$$.type==='#{head.type}'") if head.type?
 
 class Aggregate extends Rule
   constructor: (@solver, opts) ->
@@ -236,10 +235,8 @@ class Aggregate extends Rule
     throw new Error("no aggregate head defined in #{@name}") unless @aggregate
   compile: ->
     super()
-    g = @head.guard ?= []
-    # g.push ["!$$.chr$lock"]
-    @head.vars ?= []
-    @aggregate.vars ?= []
+    compileHead @head
+    compileHead @aggregate
   genMap: ->
     aggregateMapTemplate @
   genReduce: ->
@@ -384,7 +381,7 @@ class Store
     reg = new Region(@,key)
     try
       return f(reg)
-    finally 
+    finally
       reg.exit()
   # waits for view from its last query
   waitView: (name) ->
@@ -711,8 +708,8 @@ DoubleHeadPrpg::commit = (store) ->
   if STAT
     stat = (tag, val...) =>
       console.log chalk.yellow("STAT:"), "#{name}: #{tag}:", val...   
-  console.time "#{name} request" if STAT
   console.time "#{name}" if STAT
+  console.time "#{name} request" if STAT
   t = store.view @headName, {include_docs: true}
   console.timeEnd "#{name} request" if STAT
   tid = @getTid() 
@@ -731,6 +728,7 @@ DoubleHeadPrpg::commit = (store) ->
     statMatched = 0
     statPhKeys = 0
     statPhMatched = 0
+    console.time "#{name} prod" if STAT
     for i in rows
       doc = i.doc
       continue if doc.chr$skip or doc._deleted
@@ -764,6 +762,7 @@ DoubleHeadPrpg::commit = (store) ->
               continue
             ++statMatched
             prods.push [args, histKey, sharedVars.concat([order])]
+    console.timeEnd "#{name} prod" if STAT
     phbulk = []
     console.time("#{name} ph") if STAT
     for [i,histKey,key] in prods
@@ -798,6 +797,7 @@ DoubleHeadPrpg::commit = (store) ->
       stat "PH: ok:", statPH
       stat "PH: conflict:", r.length - statPH
       stat "effect", effect 
+  console.timeEnd("#{name}") if STAT
   console.log "commit #{name}:", chalk.green("DONE!"), effect 
   return effect is 0
   

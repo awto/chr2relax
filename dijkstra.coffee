@@ -94,16 +94,20 @@ commit_label = ->
   getStore().commit("label")
 
 resetHard = ->
-  db = getDb()
-  yop db.cot.jsonRequest "DELETE", "/#{db.name}" 
-  yop db.cot.jsonRequest "PUT", "/#{db.name}"
-  migrateCmd()
+  clean()
   yop db.post {type:"edge",from:1,weight:1,to:2}
   yop db.post {type:"edge",from:1,weight:10,to:3}
   yop db.post {type:"edge",from:2,weight:1,to:4}
   yop db.post {type:"edge",from:3,weight:9,to:4}
   yop db.post {type:"edge",from:4,weight:2,to:1}
   yop db.post {type:"source",id:1}
+
+clean = ->
+  db = getDb()
+  yop db.cot.jsonRequest "DELETE", "/#{db.name}" 
+  yop db.cot.jsonRequest "PUT", "/#{db.name}"
+  migrateCmd()
+
 
 gc = ->
   getStore().gcIter()
@@ -115,6 +119,7 @@ commands = {
   label: commit_label
   init: commit_init
   reset: resetHard
+  clean
   gc
   }
 

@@ -282,8 +282,12 @@ compileViews = (solver) ->
     nm = "head_#{r.name}"
     v = views[nm] =
       map: r.genMap()
-    v.reduce = r.genReduce() if r.genReduce?      
+    v.reduce = r.genReduce() if r.genReduce?
     filters[nm] = r.genFilter()
+    if r.genKeyView?
+      views["key_#{r.name}"] = r.genKeyView()
+    if r.customViews?
+      views[i] = v for i, v of r.customViews        
   solver
 
 compileConstraints = (solver) ->
@@ -349,10 +353,11 @@ class Region
     catch e
       console.log chalk.red("couldn't unlock"), doc, e
   exit: ->
-    {bulk,STAT} = @
+    {bulk,STAT,seenField} = @
     console.time "#{STAT} exit" if STAT?
     for i in @locked when not i._deleted
       delete i.chr$lock
+      i[seenField] = true if seenField?
       bulk.push i
     res = yop @store.db.bulk bulk
     @locked.length = 0
@@ -383,7 +388,8 @@ class Store
       return f(reg)
     finally
       reg.exit()
-  # waits for view from its last query
+  # listens to changes feed until it signals something was changed which may
+  # make the rule to match something (or may not)
   waitView: (name) ->
     last = @seq[name]
     loop 
@@ -395,6 +401,8 @@ class Store
       if r.results.length
         return
   migrate: -> migrate @db, @solver
+  # just a helper function returning rule either by its name or id
+  # (depending on argument type)
   getRule: (id) ->
     res = if id.substr?
       @solver.byName[id]
@@ -407,13 +415,21 @@ class Store
         console.log " * #{i}"
       throw new Error("no such rule #{id}") 
     res
+  # handless all keys (shared variables) in one request
+  # listens to changes feed for starting next iteration
   loopRule: (id) ->
     {headName} = r = @getRule id
     loop
       r.commit @
       @waitView headName
     return
+  # yop wrapper over `loopRule`
   loopRuleQ: (id) -> yop.frun => @loopRule(id)
+  # handles only some part of matching keys
+  # specified with usual view parameters (typically skip/limit)
+  # passed in the second argument
+  commitSome: (id, params) -> 
+    @getRule(id).commitSome(params)
   commit: (id) ->
     @getRule(id).commit(@)
   post: (obj) ->
@@ -698,11 +714,43 @@ DoubleHead::commit = (store) ->
   console.log "commit #{name}:", chalk.green("DONE!"), effect 
   return effect is 0
 
-class DoubleHeadPrpg extends DoubleHead
-  constructor: (store, rule) -> super(store, rule)
-  prpg: true
+doubleHeadPrpgTemplate = _.template("""
+  <% var i, j, head, shared = rule.shared;
+  %>function(doc) {
+    var $$ = $1 = doc, $key;
+    <% if (rule.variable) { %>
+      var <%=rule.variable%> = doc;
+    <% } %>
+    if (doc.type === "chr$ph" && doc.rule === "<%=rule.name%>") {
+      emit(doc.key,-2);
+      return;
+    }
+    <% for(i = 1; i<=2; i++) {
+        head = rule["head"+i];
+        if (!head)
+          throw new Error("no head " + i + "defined");
+        %>
+          if (<%=head.guard.join(" && ")%>) {
+            <%= rule.mkWith(head) %>
+             $key = [];
+             <% for(j = 0; j < shared.length; ++j) { %>
+                $key.push(<%=head.shared[shared[j]]%>);
+             <% } %>
+             emit($key,1);
+        }
+    <% } %>
+  }
+  """,{variable:"rule"})
 
-DoubleHeadPrpg::commit = (store) ->
+class DoubleHeadPrpg extends DoubleHead
+  constructor: (store, rule) ->
+    super(store, rule)
+  prpg: true
+  genKeyView: ->
+    map: doubleHeadPrpgTemplate @
+    reduce: "_sum" 
+
+DoubleHeadPrpg::commit = (store, params) ->
   STAT = @STAT ? GLOBAL_STAT
   {shared,actions,_guard,name} = @
   if STAT
@@ -710,7 +758,9 @@ DoubleHeadPrpg::commit = (store) ->
       console.log chalk.yellow("STAT:"), "#{name}: #{tag}:", val...   
   console.time "#{name}" if STAT
   console.time "#{name} request" if STAT
-  t = store.view @headName, {include_docs: true}
+  params ?= {}
+  params.include_docs = true
+  t = store.view @headName, params
   console.timeEnd "#{name} request" if STAT
   tid = @getTid() 
   first = []
@@ -720,6 +770,7 @@ DoubleHeadPrpg::commit = (store) ->
   ph = {}
   store.inRegion tid, (reg) =>
     reg.STAT = name if STAT
+    #reg.seenField = "chr$s$#{name}"
     console.time "#{name} lock" if STAT
     rows = reg.lockAll(t.rows)
     console.timeEnd "#{name} lock" if STAT
@@ -800,7 +851,16 @@ DoubleHeadPrpg::commit = (store) ->
   console.timeEnd("#{name}") if STAT
   console.log "commit #{name}:", chalk.green("DONE!"), effect 
   return effect is 0
-  
+
+DoubleHeadPrpg::commitSome = (store, params) ->
+  {db} = @store
+  params ?= {}   
+  params.limit ?= 1
+  res = yop db.view "key_#{name}", params
+  return unless t.rows.length
+  inner.startkey = t.rows[0].key
+  inner.endkey = t.rows[t.rows.length-1].key.concat([5])
+
 Aggregate::commit = (store) ->
   t = store.view @headName, {group:true}
   tid = @getTid() 
